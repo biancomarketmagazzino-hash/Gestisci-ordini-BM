@@ -111,17 +111,19 @@ else:
         else:
             df_merged['VENDUTO_STAGIONE'] = 0
 
-        # Campo Ricerca
+       # Campo Ricerca
         query = st.chat_input("Scrivi una marca, fornitore o articolo (es. STROFINACCI, BASSETTI, TOVAGLIA)...")
 
         if query:
             parole_chiave = query.lower().split()
             colonne_txt = df_merged.select_dtypes(include=['object']).columns
-            df_merged['TESTO_RICERCA'] = df_merged[colonne_txt].astype(str).agg(' '.join, axis=1).str.lower()
+            
+            # Correzione del TypeError per Pandas/Python 3.14
+            df_merged['TESTO_RICERCA'] = df_merged[colonne_txt].astype(str).apply(lambda row: ' '.join(row), axis=1).str.lower()
 
             maschera = df_merged['TESTO_RICERCA'].apply(lambda txt: all(p in txt for p in parole_chiave))
             risultati = df_merged[maschera].copy()
-
+            
             if risultati.empty:
                 st.warning("⚠️ Nessun articolo trovato.")
             else:
