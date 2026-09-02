@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from dbfread import DBF
 import os
+import struct
 
 st.set_page_config(page_title="Riassortimento Bianco Market", page_icon="📦", layout="wide")
 
@@ -33,33 +34,84 @@ st.markdown("""
 
 st.title("📦 Assistente Riassortimenti Bianco Market")
 
-# Funzione per trovare il file indipendentemente da maiuscole/minuscole
 def trova_file(nome_target):
-    files = os.listdir('.')
-    for f in files:
+    for f in os.listdir('.'):
         if f.lower() == nome_target.lower():
             return f
     return None
 
+def carica_dbf_robusto(filepath):
+    """Tenta la lettura con dbfread e, in caso di errore di buffer, passa a un parser di ripiego."""
+    if not filepath or not os.path.exists(filepath):
+        return pd.DataFrame()
+    
+    # Tentativo 1: Lettura standard tollerante
+    try:
+        table = DBF(filepath, encoding='latin1', ignore_missing_memofile=True, char_decode_errors='ignore')
+        return pd.DataFrame(iter(table))
+    except Exception:
+        pass
+
+    # Tentativo 2: Lettura binaria tollerante per header personalizzati/FoxPro
+    try:
+        with open(filepath, 'rb') as f:
+            data = f.read()
+            if len(data) < 32:
+                return pd.DataFrame()
+            
+            # Estrazione parametri header DBF
+            num_rec, header_len, rec_len = struct.unpack('<IHH', data[4:12])
+            
+            fields = []
+            offset = 32
+            while offset < header_len - 1:
+                field_data = data[offset:offset+32]
+                if len(field_data) < 32 or field_data[0] == 0x0D:
+                    break
+                name = field_data[:11].replace(b'\x00', b'').decode('latin1', errors='ignore').strip()
+                f_type = chr(field_data[11])
+                f_len = field_data[16]
+                if name:
+                    fields.append((name, f_type, f_len))
+                offset += 32
+            
+            records = []
+            curr = header_len
+            for _ in range(num_rec):
+                if curr + rec_len > len(data):
+                    break
+                rec = data[curr:curr+rec_len]
+                if rec and rec[0] != 0x2A: # Salva i record non cancellati
+                    row = {}
+                    r_off = 1
+                    for name, f_type, f_len in fields:
+                        val = rec[r_off:r_off+f_len].decode('latin1', errors='ignore').strip()
+                        row[name] = val
+                        r_off += f_len
+                    records.append(row)
+                curr += rec_len
+            return pd.DataFrame(records)
+    except Exception as e:
+        st.warning(f"⚠️ Impossibile elaborare {filepath}: {str(e)}")
+        return pd.DataFrame()
+
 @st.cache_data(ttl=3600)
-def carica_e_elabora_dbf():
+def elabora_dati():
     file_art = trova_file('ARTICOLI.DBF')
     file_sit = trova_file('Sit_filiali.DBF')
     file_stor = trova_file('STOR_CAR.DBF')
     
     if not file_art or not file_sit:
-        return None, f"⚠️ File DBF non trovati. Rilevati nella cartella: {os.listdir('.')}"
+        return None, f"⚠️ File non trovati nel repository. File presenti: {os.listdir('.')}"
     
-    try:
-        # Caricamento DBF con encoding flessibile
-        art_df = pd.DataFrame(iter(DBF(file_art, encoding='latin1', ignore_missing_memofile=True)))
-        sit_df = pd.DataFrame(iter(DBF(file_sit, encoding='latin1', ignore_missing_memofile=True)))
-        
-        stor_df = pd.DataFrame()
-        if file_stor:
-            stor_df = pd.DataFrame(iter(DBF(file_stor, encoding='latin1', ignore_missing_memofile=True)))
+    art_df = carica_dbf_robusto(file_art)
+    sit_df = carica_dbf_robusto(file_sit)
+    stor_df = carica_dbf_robusto(file_stor)
+    
+    if art_df.empty or sit_df.empty:
+        return None, "❌ Errore nella lettura della struttura dei file DBF. Verificare che i file non siano in uso da altri programmi."
 
-        # Mappatura depositi
+    try:
         mappa_depositi = {
             'C_01': 'MAGAZZINO', 'C_02': 'SCIACCA', 'C_03': 'MENFI',
             'C_04': 'MARSALA', 'C_05': 'TRAPANI', 'C_06': 'RAGUSA',
@@ -67,18 +119,14 @@ def carica_e_elabora_dbf():
         }
         sit_df.rename(columns=mappa_depositi, inplace=True)
         
-        # Identificazione colonne per unione
         col_art = [c for c in art_df.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
         col_sit = [c for c in sit_df.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
         
-        # Unione Anagrafica + Giacenze Filiali
         df_merged = pd.merge(art_df, sit_df, left_on=col_art, right_on=col_sit, how='inner')
         
-        # Calcolo Giacenza Totale
         col_presenti = [c for c in mappa_depositi.values() if c in df_merged.columns]
         df_merged['GIACENZA_TOTALE'] = df_merged[col_presenti].apply(pd.to_numeric, errors='coerce').fillna(0).sum(axis=1)
         
-        # Calcolo Venduto da STOR_CAR se disponibile
         if not stor_df.empty:
             col_stor_cod = [c for c in stor_df.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
             col_qta = [c for c in stor_df.columns if 'qta' in c.lower() or 'quant' in c.lower() or 'mov' in c.lower()]
@@ -95,20 +143,19 @@ def carica_e_elabora_dbf():
 
         return df_merged, None
     except Exception as e:
-        return None, f"Errore durante l'elaborazione dei dati: {str(e)}"
+        return None, f"Errore nell'elaborazione: {str(e)}"
 
-df, errore = carica_e_elabora_dbf()
+df, errore = elabora_dati()
 
 if errore:
     st.error(errore)
 else:
-    st.success("✅ Dati reali caricati e sincronizzati correttamente dai file DBF!")
+    st.success("✅ File DBF elaborati con successo!")
 
-query = st.chat_input("Scrivi qui la marca, il fornitore o l'articolo (es. 100 SBADIGLI, DAG, PIGIAMA)...")
+query = st.chat_input("Scrivi qui la marca, il fornitore o l'articolo...")
 
 if query and df is not None:
     parole_chiave = query.lower().split()
-    
     colonne_txt = df.select_dtypes(include=['object']).columns
     df['TESTO_RICERCA'] = df[colonne_txt].astype(str).agg(' '.join, axis=1).str.lower()
     
@@ -116,13 +163,12 @@ if query and df is not None:
     risultati = df[maschera].copy()
     
     if risultati.empty:
-        st.warning("⚠️ Nessun articolo trovato con i criteri cercati.")
+        st.warning("⚠️ Nessun articolo trovato.")
     else:
-        # Ordinamento dal più venduto al meno venduto
         if 'VENDUTO_STAGIONE' in risultati.columns:
             risultati = risultati.sort_values(by='VENDUTO_STAGIONE', ascending=False)
             
-        st.subheader(f"📊 Risultati trovati: {len(risultati)} articoli")
+        st.subheader(f"📊 Articoli trovati: {len(risultati)}")
         
         dati_export = []
         for _, row in risultati.head(40).iterrows():
@@ -130,7 +176,6 @@ if query and df is not None:
             cod = row.get('Codice_art', row.get('CODICE', 'N/D'))
             giac = int(row.get('GIACENZA_TOTALE', 0))
             venduto = int(row.get('VENDUTO_STAGIONE', 0))
-            
             proposta = max(0, venduto - giac) if venduto > 0 else (10 if giac == 0 else 0)
             
             dati_export.append({
@@ -145,7 +190,7 @@ if query and df is not None:
                 st.markdown(f"""
                     <div class="card-ordina">
                         <h4>🟢 {desc} (Cod. {cod})</h4>
-                        <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale Negozi: <b>{giac} pz</b></p>
+                        <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale: <b>{giac} pz</b></p>
                         <h3>👉 CONSIGLIO RIASSORTIMENTO: Ordina {proposta} pz</h3>
                     </div>
                 """, unsafe_allow_html=True)
@@ -153,7 +198,7 @@ if query and df is not None:
                 st.markdown(f"""
                     <div class="card-no-ordina">
                         <h4>🔴 {desc} (Cod. {cod})</h4>
-                        <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale Negozi: <b>{giac} pz</b></p>
+                        <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale: <b>{giac} pz</b></p>
                         <p><b>❌ NON ORDINARE: Scorta sufficiente</b></p>
                     </div>
                 """, unsafe_allow_html=True)
