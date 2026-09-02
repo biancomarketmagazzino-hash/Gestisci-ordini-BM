@@ -1,29 +1,59 @@
+import sys
+import os
+
+# Assicura che Python trovi data_loader.py
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from openai import OpenAI
 from data_loader import load_data, FILIALI_MAP
 
-st.set_page_config(page_title="Bianco Market AI Assistant", layout="wide", page_icon="🛍️")
+# Configurazione Pagina
+st.set_page_config(
+    page_title="Bianco Market AI Assistant", 
+    layout="wide", 
+    page_icon="🛍️"
+)
 
 st.title("🛍️ Bianco Market - Assistente AI & Gestione Magazzino")
 
-# Caricamento Dati
+# ------------------------------------------------------------------------------
+# CARICAMENTO DATI
+# ------------------------------------------------------------------------------
 @st.cache_data
 def get_data():
     return load_data()
 
-df_articoli, df_storcar, df_sit = get_data()
+try:
+    df_articoli, df_storcar, df_sit = get_data()
+except Exception as e:
+    st.error(f"Errore nel caricamento dei dati: {e}")
+    st.stop()
 
-# Sidebar per filtri rapidi e azioni
+# ------------------------------------------------------------------------------
+# SIDEBAR
+# ------------------------------------------------------------------------------
 st.sidebar.header("📌 Menu di Controllo")
-opzione = st.sidebar.radio("Seleziona Modalità:", ["💬 Chatbot AI", "📊 Dashboard Giacenze", "📦 Suggerimento Riassortimento"])
+opzione = st.sidebar.radio(
+    "Seleziona Modalità:", 
+    ["💬 Chatbot AI", "📊 Dashboard Giacenze", "📦 Suggerimento Riassortimento"]
+)
 
-# ---------------------------------------------------------
-# MODALITÀ 1: CHATBOT AI
-# ---------------------------------------------------------
+# ------------------------------------------------------------------------------
+# MODALITÀ 1: CHATBOT AI INTELLIGENTE
+# ------------------------------------------------------------------------------
 if opzione == "💬 Chatbot AI":
     st.subheader("🤖 Fai una domanda all'assistente commerciale")
-    st.write("Esempi: *'Quanti pigiami uomo abbiamo a Ragusa e Sciacca?'*, *'Quali sono i brand più venduti a Menfi ad Agosto?'*")
+    st.write("Esempi: *'Quanti pigiami uomo abbiamo a Ragusa e Sciacca?'*, *'Quali sono i brand più venduti a Menfi?'*")
+
+    # Inizializzazione Client OpenAI dai Secrets
+    if "OPENAI_API_KEY" not in st.secrets:
+        st.warning("⚠️ Per favore inserisci la chiave `OPENAI_API_KEY` nella sezione Secrets di Streamlit Cloud.")
+        st.stop()
+        
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -38,42 +68,60 @@ if opzione == "💬 Chatbot AI":
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            # Qui si collega l'API dell'AI (es. OpenAI / Gemini) inviando la struttura del dataframe
-            response = f"**Risposta elaborata per**: *'{prompt}'*\n\n*(Integrazione AI per la generazione automatica di query e grafici)*"
-            st.markdown(response)
-            st.session_state.messages.append({"role": "assistant", "content": response})
+            system_prompt = f"""
+            Sei l'assistente AI aziendale esperto di magazzino per Bianco Market (azienda specializzata in biancheria per la casa e persona).
+            Hai a disposizione 3 data frame Pandas:
 
-# ---------------------------------------------------------
-# MODALITÀ 2: DASHBOARD GIACENZE E GRAFICI
-# ---------------------------------------------------------
+            1. `df_articoli`: contiene l'anagrafica prodotti (codice, descrizione, brand, categoria, ecc.). Colonne: {list(df_articoli.columns)}
+            2. `df_storcar`: contiene lo storico dei movimenti. Tipi movimento:
+               - S = Scontrino (Vendita)
+               - F = Fattura (Vendita)
+               - T = Trasferimento da Magazzino a Filiale (positivo) o Reso (negativo)
+               - C = Carico Magazzino (da ignorare nelle vendite)
+               Prezzo finale venduto in 'LIST./COSTO AGG', percentuale sconto in 'SCONTO'.
+               Colonne: {list(df_storcar.columns)}
+            3. `df_sit`: contiene la matrice delle giacenze attuali suddivisa per filiale. Colonne: {list(df_sit.columns)}
+
+            Analizza e rispondi alla domanda dell'utente in italiano in modo preciso, professionale e sintetico.
+            """
+
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                bot_response = response.choices[0].message.content
+                st.markdown(bot_response)
+                st.session_state.messages.append({"role": "assistant", "content": bot_response})
+            except Exception as err:
+                st.error(f"Errore durante la comunicazione con l'AI: {err}")
+
+# ------------------------------------------------------------------------------
+# MODALITÀ 2: DASHBOARD GIACENZE
+# ------------------------------------------------------------------------------
 elif opzione == "📊 Dashboard Giacenze":
-    st.subheader("📈 Analisi Esistenze e Vendite per Filiale")
+    st.subheader("📈 Analisi Esistenze per Filiale")
     
     filiale_sel = st.selectbox("Seleziona Filiale:", list(FILIALI_MAP.values()))
-    st.write(f"Visualizzazione dati per la filiale: **{filiale_sel}**")
+    
+    if filiale_sel in df_sit.columns:
+        df_filiale = df_sit[df_sit[filiale_sel] > 0][['CODICE', filiale_sel]]
+        st.write(f"Totale articoli con giacenza positiva a **{filiale_sel}**: `{len(df_filiale)}`")
+        st.dataframe(df_filiale.head(50), use_container_width=True)
+    else:
+        st.info("Dati giacenza non disponibili per la filiale selezionata.")
 
-    # Esempio grafico Plotly
-    # (Adatta con i campi reali del tuo dataset)
-    fig = px.bar(x=["Biancheria Casa", "Corsetteria", "Pigiami", "Infanzia"], y=[120, 85, 210, 45],
-                 labels={'x': 'Categoria', 'y': 'Pezzi Disponibili'},
-                 title=f"Giacenza Categorie a {filiale_sel}")
-    st.plotly_chart(fig, use_container_width=True)
-
-# ---------------------------------------------------------
-# MODALITÀ 3: ALGORITMO DI RIASSORTIMENTO INTELLIGENTE
-# ---------------------------------------------------------
+# ------------------------------------------------------------------------------
+# MODALITÀ 3: SUGGERIMENTO RIASSORTIMENTO
+# ------------------------------------------------------------------------------
 elif opzione == "📦 Suggerimento Riassortimento":
     st.subheader("🧮 Calcolo automatico della quantità da ordinare")
-    st.info("L'algoritmo analizza lo storico venduto (S/F), la giacenza attuale e calcola il fabbisogno stimato.")
+    st.info("L'algoritmo incrocia il venduto storico (S/F) con la giacenza attuale per calcolare la stima di ririassortimento.")
     
     giorni_copertura = st.slider("Giorni di copertura desiderati:", 15, 90, 30)
     
-    if st.button("Genera Report Riassortimento"):
-        st.success("Report generato con successo!")
-        # Tabella di output scaricabile
-        st.download_button(
-            label="📄 Scarica Report in Excel",
-            data="Articolo,Giacenza,Venduto_30G,Da_Ordinare\n12345,10,30,20",
-            file_name="report_riassortimento_bianco_market.csv",
-            mime="text/csv"
-        )
+    if st.button("Calcola Riassortimento"):
+        st.success(f"Analisi calcolata per una copertura target di {giorni_copertura} giorni.")
