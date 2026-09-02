@@ -118,8 +118,9 @@ else:
             parole_chiave = query.lower().split()
             colonne_txt = df_merged.select_dtypes(include=['object']).columns
             
-            # Applicazione corretta per concatenazione righe senza errore di tipo
-            df_merged['TESTO_RICERCA'] = df_merged[colonne_txt].astype(str).apply(lambda row: ' '.join(row), axis=1).str.lower()
+            # Ricerca testuale ad alte prestazioni priva di incompatibilità
+            testo_unito = [' '.join(row) for row in df_merged[colonne_txt].fillna('').astype(str).values]
+            df_merged['TESTO_RICERCA'] = pd.Series(testo_unito, index=df_merged.index).str.lower()
 
             maschera = df_merged['TESTO_RICERCA'].apply(lambda txt: all(p in txt for p in parole_chiave))
             risultati = df_merged[maschera].copy()
