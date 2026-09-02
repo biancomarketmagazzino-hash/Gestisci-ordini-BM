@@ -33,107 +33,125 @@ st.markdown("""
 
 st.title("📦 Assistente Riassortimenti")
 
-# Caricamento e unione dei file DBF reali
 @st.cache_data(ttl=3600)
-def carica_dati_reali():
-    # Verifica presenza dei file
+def carica_e_elabora_dbf():
+    # Verifica presenza file
     if not (os.path.exists('Articoli.dbf') and os.path.exists('SIT_FILIALI.dbf')):
-        return None, "⚠️ File DBF non trovati su GitHub! Assicurati di aver caricato Articoli.dbf e SIT_FILIALI.dbf."
+        return None, "⚠️ File DBF non rilevati. Controlla che siano stati caricati con GitHub Desktop."
     
     try:
-        # Lettura file DBF
-        art_table = DBF('Articoli.dbf', encoding='latin1', ignore_missing_memofile=True)
-        sit_table = DBF('SIT_FILIALI.dbf', encoding='latin1', ignore_missing_memofile=True)
+        # Caricamento DBF
+        art_df = pd.DataFrame(iter(DBF('Articoli.dbf', encoding='latin1', ignore_missing_memofile=True)))
+        sit_df = pd.DataFrame(iter(DBF('SIT_FILIALI.dbf', encoding='latin1', ignore_missing_memofile=True)))
         
-        df_art = pd.DataFrame(iter(art_table))
-        df_sit = pd.DataFrame(iter(sit_table))
-        
-        # Mappatura colonne giacenze
+        # Gestione storico venduto se presente
+        if os.path.exists('storcar.dbf'):
+            stor_df = pd.DataFrame(iter(DBF('storcar.dbf', encoding='latin1', ignore_missing_memofile=True)))
+        else:
+            stor_df = pd.DataFrame()
+
+        # Mappatura depositi
         mappa_depositi = {
             'C_01': 'MAGAZZINO', 'C_02': 'SCIACCA', 'C_03': 'MENFI',
             'C_04': 'MARSALA', 'C_05': 'TRAPANI', 'C_06': 'RAGUSA',
             'C_07': 'SABELLA', 'C_08': 'MAZARA', 'C_09': 'CASA MARKET', 'C_10': 'BM SPORT'
         }
-        df_sit.rename(columns=mappa_depositi, inplace=True)
+        sit_df.rename(columns=mappa_depositi, inplace=True)
         
-        # Unione dei dati sul codice articolo
-        col_codice_art = [c for c in df_art.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
-        col_codice_sit = [c for c in df_sit.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
+        # Identificazione colonne chiave per la fusione
+        col_art = [c for c in art_df.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
+        col_sit = [c for c in sit_df.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
         
-        df_merged = pd.merge(df_art, df_sit, left_on=col_codice_art, right_on=col_codice_sit, how='inner')
+        # Unione Anagrafica + Giacenze Filiali
+        df_merged = pd.merge(art_df, sit_df, left_on=col_art, right_on=col_sit, how='inner')
         
-        # Calcolo Giacenza Totale
-        colonne_depositi = list(mappa_depositi.values())
-        colonne_presenti = [c for c in colonne_depositi if c in df_merged.columns]
-        df_merged['GIACENZA_TOTALE'] = df_merged[colonne_presenti].sum(axis=1)
+        # Calcolo Giacenza Totale attuale nei negozi
+        col_presenti = [c for c in mappa_depositi.values() if c in df_merged.columns]
+        df_merged['GIACENZA_TOTALE'] = df_merged[col_presenti].apply(pd.to_numeric, errors='coerce').fillna(0).sum(axis=1)
         
+        # Calcolo Venduto da storcar se disponibile
+        if not stor_df.empty:
+            col_stor_cod = [c for c in stor_df.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
+            col_qta = [c for c in stor_df.columns if 'qta' in c.lower() or 'quant' in c.lower() or 'mov' in c.lower()]
+            col_qta_nome = col_qta[0] if col_qta else stor_df.columns[-1]
+            
+            stor_df[col_qta_nome] = pd.to_numeric(stor_df[col_qta_nome], errors='coerce').fillna(0)
+            venduto_agg = stor_df.groupby(col_stor_cod)[col_qta_nome].sum().reset_index()
+            venduto_agg.columns = [col_art, 'VENDUTO_STAGIONE']
+            
+            df_merged = pd.merge(df_merged, venduto_agg, on=col_art, how='left')
+            df_merged['VENDUTO_STAGIONE'] = df_merged['VENDUTO_STAGIONE'].fillna(0)
+        else:
+            df_merged['VENDUTO_STAGIONE'] = 0
+
         return df_merged, None
     except Exception as e:
-        return None, f"Errore nella lettura dei file DBF: {str(e)}"
+        return None, f"Errore durante l'elaborazione dei dati: {str(e)}"
 
-df_completo, errore = carica_dati_reali()
+df, errore = carica_e_elabora_dbf()
 
 if errore:
     st.error(errore)
-    st.info("👉 Per far funzionare l'app con i tuoi dati reali, carica i file 'Articoli.dbf' e 'SIT_FILIALI.dbf' nella cartella del tuo repository GitHub.")
 else:
-    st.success("✅ Dati DBF caricati e sincronizzati correttamente!")
+    st.success("✅ Dati reali sincronizzati con successo dai file DBF!")
 
-# Ricerca dinamica sui dati veri
-query = st.chat_input("Scrivi una marca, fornitore o tipo di articolo (es. 100 SBADIGLI, DAG, PIGIAMA)...")
+query = st.chat_input("Esempio: Quante calze invernali abbiamo venduto della marca DAG?")
 
-if query and df_completo is not None:
-    st.subheader(f"Risultati per la ricerca: \"{query}\"")
+if query and df is not None:
+    parole_chiave = query.lower().split()
     
-    # Filtro parole chiave cercate dall'utente su tutte le colonne di testo
-    query_words = query.lower().split()
+    # Creazione colonna di testo unificata per la ricerca
+    colonne_txt = df.select_dtypes(include=['object']).columns
+    df['TESTO_RICERCA'] = df[colonne_txt].astype(str).agg(' '.join, axis=1).str.lower()
     
-    # Crea una colonna unica di testo per cercare la descrizione/marca/fornitore
-    colonne_testo = df_completo.select_dtypes(include=['object']).columns
-    df_completo['TESTO_RICERCA'] = df_completo[colonne_testo].astype(str).agg(' '.join, axis=1).str.lower()
-    
-    # Applica il filtro
-    maschera = df_completo['TESTO_RICERCA'].apply(lambda x: all(word in x for word in query_words))
-    risultati = df_completo[maschera]
+    # Filtro dinamico su tutte le parole digitate dall'utente
+    maschera = df['TESTO_RICERCA'].apply(lambda txt: all(p in txt for p in parole_chiave))
+    risultati = df[maschera].copy()
     
     if risultati.empty:
-        st.warning("Nessun articolo trovato per la ricerca inserita.")
+        st.warning("⚠️ Nessun articolo trovato con i criteri cercati. Prova ad usare termini più generici o il codice del fornitore.")
     else:
-        # Mostra i primi 20 articoli trovati sui dati reali
-        dati_export = []
-        for _, row in risultati.head(20).iterrows():
-            desc = row.get('DESCRIZIONE', row.get('DESCR', 'Articolo senza descrizione'))
-            cod = row.get('Codice_art', row.get('CODICE', 'N/D'))
-            giac = row.get('GIACENZA_TOTALE', 0)
+        # Ordinamento dal più venduto al meno venduto
+        if 'VENDUTO_STAGIONE' in risultati.columns:
+            risultati = risultati.sort_values(by='VENDUTO_STAGIONE', ascending=False)
             
-            # Calcolo di esempio del fabbisogno (puoi personalizzarlo)
-            consiglio = 12 if giac < 5 else 0 
+        st.subheader(f"📊 Analisi Vendite e Riassortimento ({len(risultati)} articoli trovati)")
+        
+        dati_export = []
+        for _, row in risultati.head(30).iterrows():
+            desc = row.get('DESCRIZIONE', row.get('DESCR', 'Articolo'))
+            cod = row.get('Codice_art', row.get('CODICE', 'N/D'))
+            giac = int(row.get('GIACENZA_TOTALE', 0))
+            venduto = int(row.get('VENDUTO_STAGIONE', 0))
+            
+            # Calcolo proposta ordine: Venduto - Giacenza Attuale
+            proposta = max(0, venduto - giac) if venduto > 0 else (10 if giac == 0 else 0)
             
             dati_export.append({
                 "Codice": cod,
-                "Articolo": desc,
+                "Descrizione": desc,
+                "Venduto": venduto,
                 "Giacenza Totale": giac,
-                "Consiglio Ordine": consiglio
+                "Proposta Ordine": proposta
             })
             
-            if consiglio > 0:
+            if proposta > 0:
                 st.markdown(f"""
                     <div class="card-ordina">
                         <h4>🟢 {desc} (Cod. {cod})</h4>
-                        <p>Giacenza Attuale nei 10 punti vendita: <b>{giac} pz</b></p>
-                        <h3>👉 CONSIGLIATO ORDINARE: {consiglio} pz</h3>
+                        <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Attuale nei Negozi: <b>{giac} pz</b></p>
+                        <h3>👉 CONSIGLIO RIASSORTIMENTO: Ordina {proposta} pz</h3>
                     </div>
                 """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                     <div class="card-no-ordina">
                         <h4>🔴 {desc} (Cod. {cod})</h4>
-                        <p>Giacenza Attuale nei 10 punti vendita: <b>{giac} pz</b></p>
-                        <p><b>Scorta sufficiente - Non ordinare</b></p>
+                        <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Attuale nei Negozi: <b>{giac} pz</b></p>
+                        <p><b>❌ NON ORDINARE: Scorta sufficiente</b></p>
                     </div>
                 """, unsafe_allow_html=True)
         
-        # Pulsanti Stampa ed Export
         col1, col2 = st.columns(2)
         with col1:
             st.components.v1.html(
@@ -142,4 +160,4 @@ if query and df_completo is not None:
             )
         with col2:
             df_exp = pd.DataFrame(dati_export)
-            st.download_button("📊 Scarica Excel Ordine", data=df_exp.to_csv(index=False).encode('utf-8'), file_name="ordine_riassortimento.csv", mime="text/csv", use_container_width=True)
+            st.download_button("📊 Scarica Excel Ordine", data=df_exp.to_csv(index=False).encode('utf-8'), file_name="ordine_fornitore.csv", mime="text/csv", use_container_width=True)
