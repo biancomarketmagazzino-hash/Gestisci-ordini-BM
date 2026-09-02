@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import dbfread
 import os
 
 st.set_page_config(page_title="Riassortimento Bianco Market", page_icon="📦", layout="wide")
@@ -33,41 +32,51 @@ st.markdown("""
 
 st.title("📦 Assistente Riassortimenti Bianco Market")
 
-def cerca_file_case_insensitive(nome_target):
-    for f in os.listdir('.'):
-        if f.lower() == nome_target.lower():
-            return f
+def trova_file_csv(nomi_possibili):
+    files_presenti = os.listdir('.')
+    for nome in nomi_possibili:
+        for f in files_presenti:
+            if f.lower() == nome.lower():
+                return f
     return None
 
-def leggi_dbf_semplice(percorso):
+def leggi_csv_flessibile(percorso):
     if not percorso or not os.path.exists(percorso):
         return pd.DataFrame()
     try:
-        table = dbfread.DBF(percorso, encoding='latin1', ignore_missing_memofile=True, raw=False)
-        return pd.DataFrame(list(table))
+        try:
+            return pd.read_csv(percorso, sep=',', encoding='latin1', low_memory=False)
+        except Exception:
+            return pd.read_csv(percorso, sep=';', encoding='latin1', low_memory=False)
     except Exception as e:
-        st.warning(f"Avviso lettura {percorso}: {str(e)}")
+        st.error(f"Errore nella lettura del file {percorso}: {e}")
         return pd.DataFrame()
 
-# Caricamento diretto senza st.cache_data per evitare crash di memoria
-file_art = cerca_file_case_insensitive('ARTICOLI.DBF')
-file_sit = cerca_file_case_insensitive('Sit_filiali.DBF')
-file_stor = cerca_file_case_insensitive('STOR_CAR.DBF')
+# Individuazione file
+file_art = trova_file_csv(['ARTICOLI.csv', 'ARTICOLI.CSV'])
+file_sit = trova_file_csv(['SITUAZIONI FILIALI.csv', 'Sit_filiali.csv', 'SITUAZIONI_FILIALI.csv'])
+file_stor = trova_file_csv(['STORICO.csv', 'STOR_CAR.csv'])
 
 if not file_art or not file_sit:
-    st.error(f"⚠️ Impossibile trovare i file DBF. File presenti nella cartella: {os.listdir('.')}")
+    st.warning("⚠️ Impossibile trovare i file principali. Verificare che 'ARTICOLI.csv' e 'SITUAZIONI FILIALI.csv' siano presenti sul repository.")
 else:
-    with st.spinner("Caricamento ed elaborazione dati in corso..."):
-        df_art = leggi_dbf_semplice(file_art)
-        df_sit = leggi_dbf_semplice(file_sit)
-        df_stor = leggi_dbf_semplice(file_stor)
+    df_art = leggi_csv_flessibile(file_art)
+    df_sit = leggi_csv_flessibile(file_sit)
+    df_stor = leggi_csv_flessibile(file_stor) if file_stor else pd.DataFrame()
 
     if df_art.empty or df_sit.empty:
-        st.error("❌ Impossibile caricare le tabelle principali. Verifica che i file sul repository non siano corrotti.")
+        st.error("❌ Errore durante il caricamento dei dati. Verificare il formato dei file CSV.")
     else:
-        st.success("✅ Dati DBF caricati correttamente!")
+        st.success("✅ Dati di magazzino e vendite sincronizzati con successo!")
 
-        # Mappatura colonne depositi
+        # Normalizzazione codici articolo
+        col_art_cod = [c for c in df_art.columns if 'cod' in c.lower()][0]
+        col_sit_cod = [c for c in df_sit.columns if 'cod' in c.lower()][0]
+
+        df_art[col_art_cod] = df_art[col_art_cod].astype(str).str.strip()
+        df_sit[col_sit_cod] = df_sit[col_sit_cod].astype(str).str.strip()
+
+        # Mappatura Depositi / Negozi
         mappa_depositi = {
             'C_01': 'MAGAZZINO', 'C_02': 'SCIACCA', 'C_03': 'MENFI',
             'C_04': 'MARSALA', 'C_05': 'TRAPANI', 'C_06': 'RAGUSA',
@@ -75,33 +84,35 @@ else:
         }
         df_sit.rename(columns=mappa_depositi, inplace=True)
 
-        # Trova colonne di unione
-        col_art = [c for c in df_art.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
-        col_sit = [c for c in df_sit.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
-
-        df_merged = pd.merge(df_art, df_sit, left_on=col_art, right_on=col_sit, how='inner')
+        # Unione Anagrafica e Situazione Filiali
+        df_merged = pd.merge(df_art, df_sit, left_on=col_art_cod, right_on=col_sit_cod, how='left')
 
         # Calcolo Giacenza Totale
         col_presenti = [c for c in mappa_depositi.values() if c in df_merged.columns]
-        df_merged['GIACENZA_TOTALE'] = df_merged[col_presenti].apply(pd.to_numeric, errors='coerce').fillna(0).sum(axis=1)
+        if col_presenti:
+            df_merged['GIACENZA_TOTALE'] = df_merged[col_presenti].apply(pd.to_numeric, errors='coerce').fillna(0).sum(axis=1)
+        else:
+            col_esi = [c for c in df_art.columns if 'esisten' in c.lower() or 'giac' in c.lower()]
+            df_merged['GIACENZA_TOTALE'] = pd.to_numeric(df_merged[col_esi[0]], errors='coerce').fillna(0) if col_esi else 0
 
-        # Calcolo Venduto da STOR_CAR
+        # Elaborazione Venduto da STORICO
         if not df_stor.empty:
-            col_stor_cod = [c for c in df_stor.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
-            col_qta = [c for c in df_stor.columns if 'qta' in c.lower() or 'quant' in c.lower() or 'mov' in c.lower()]
-            col_qta_nome = col_qta[0] if col_qta else df_stor.columns[-1]
+            col_stor_cod = [c for c in df_stor.columns if 'cod' in c.lower()][0]
+            col_qta = [c for c in df_stor.columns if 'qta' in c.lower() or 'quant' in c.lower()][0]
 
-            df_stor[col_qta_nome] = pd.to_numeric(df_stor[col_qta_nome], errors='coerce').fillna(0)
-            venduto_agg = df_stor.groupby(col_stor_cod)[col_qta_nome].sum().reset_index()
-            venduto_agg.columns = [col_art, 'VENDUTO_STAGIONE']
+            df_stor[col_stor_cod] = df_stor[col_stor_cod].astype(str).str.strip()
+            df_stor[col_qta] = pd.to_numeric(df_stor[col_qta], errors='coerce').fillna(0)
 
-            df_merged = pd.merge(df_merged, venduto_agg, on=col_art, how='left')
+            venduto_agg = df_stor.groupby(col_stor_cod)[col_qta].sum().reset_index()
+            venduto_agg.columns = [col_art_cod, 'VENDUTO_STAGIONE']
+
+            df_merged = pd.merge(df_merged, venduto_agg, on=col_art_cod, how='left')
             df_merged['VENDUTO_STAGIONE'] = df_merged['VENDUTO_STAGIONE'].fillna(0)
         else:
             df_merged['VENDUTO_STAGIONE'] = 0
 
-        # Barra di Ricerca
-        query = st.chat_input("Scrivi una marca, fornitore o articolo (es. 100 SBADIGLI, DAG, PIGIAMA)...")
+        # Campo Ricerca
+        query = st.chat_input("Scrivi una marca, fornitore o articolo (es. STROFINACCI, BASSETTI, TOVAGLIA)...")
 
         if query:
             parole_chiave = query.lower().split()
@@ -114,23 +125,34 @@ else:
             if risultati.empty:
                 st.warning("⚠️ Nessun articolo trovato.")
             else:
-                risultati = risultati.sort_values(by='VENDUTO_STAGIONE', ascending=False)
                 st.subheader(f"📊 Articoli trovati: {len(risultati)}")
 
                 dati_export = []
-                for _, row in risultati.head(40).iterrows():
-                    desc = row.get('DESCRIZIONE', row.get('DESCR', row.get('ARTICOLO', 'Articolo')))
-                    cod = row.get(col_art, 'N/D')
+                col_desc = [c for c in df_art.columns if 'desc' in c.lower() or 'art' in c.lower()][0]
+
+                for _, row in risultati.head(50).iterrows():
+                    desc = str(row.get(col_desc, 'Articolo')).strip()
+                    cod = str(row.get(col_art_cod, 'N/D')).strip()
                     giac = int(row.get('GIACENZA_TOTALE', 0))
                     venduto = int(row.get('VENDUTO_STAGIONE', 0))
+                    
+                    col_scorta = [c for c in df_art.columns if 'scorta' in c.lower()]
+                    s_scorta = int(row.get(col_scorta[0], 0)) if col_scorta else 0
 
-                    proposta = max(0, venduto - giac) if venduto > 0 else (10 if giac == 0 else 0)
+                    # Calcolo Proposta Ordine
+                    if venduto > 0:
+                        proposta = max(0, venduto - giac)
+                    elif giac <= s_scorta:
+                        proposta = max(1, s_scorta - giac) if s_scorta > 0 else 5
+                    else:
+                        proposta = 0
 
                     dati_export.append({
                         "Codice": cod,
                         "Descrizione": desc,
                         "Venduto": venduto,
                         "Giacenza Totale": giac,
+                        "Scorta Minima": s_scorta,
                         "Proposta Ordine": proposta
                     })
 
@@ -138,7 +160,7 @@ else:
                         st.markdown(f"""
                             <div class="card-ordina">
                                 <h4>🟢 {desc} (Cod. {cod})</h4>
-                                <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale Negozi: <b>{giac} pz</b></p>
+                                <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale: <b>{giac} pz</b> | Scorta Minima: <b>{s_scorta} pz</b></p>
                                 <h3>👉 CONSIGLIO RIASSORTIMENTO: Ordina {proposta} pz</h3>
                             </div>
                         """, unsafe_allow_html=True)
@@ -146,7 +168,7 @@ else:
                         st.markdown(f"""
                             <div class="card-no-ordina">
                                 <h4>🔴 {desc} (Cod. {cod})</h4>
-                                <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale Negozi: <b>{giac} pz</b></p>
+                                <p>📦 Venduto Registrato: <b>{venduto} pz</b> | Giacenza Totale: <b>{giac} pz</b> | Scorta Minima: <b>{s_scorta} pz</b></p>
                                 <p><b>❌ NON ORDINARE: Scorta sufficiente</b></p>
                             </div>
                         """, unsafe_allow_html=True)
@@ -154,9 +176,9 @@ else:
                 col1, col2 = st.columns(2)
                 with col1:
                     st.components.v1.html(
-                        '<button onclick="window.print()" style="background-color:#1a73e8;color:white;border:none;padding:12px;border-radius:5px;width:100%;font-weight:bold;cursor:pointer;">🖨️ Stampa Rapida Report A4</button>',
+                        '<button onclick="window.print()" style="background-color:#1a73e8;color:white;border:none;padding:12px;border-radius:5px;width:100%;font-weight:bold;cursor:pointer;">🖨️ Stampa Report A4</button>',
                         height=50
                     )
                 with col2:
                     df_exp = pd.DataFrame(dati_export)
-                    st.download_button("📊 Scarica Excel Ordine", data=df_exp.to_csv(index=False).encode('utf-8'), file_name="ordine_fornitore.csv", mime="text/csv", use_container_width=True)
+                    st.download_button("📊 Scarica Ordine CSV", data=df_exp.to_csv(index=False).encode('utf-8'), file_name="proposta_ordine.csv", mime="text/csv", use_container_width=True)
