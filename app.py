@@ -5,7 +5,6 @@ import os
 
 st.set_page_config(page_title="Riassortimento Bianco Market", page_icon="📦", layout="wide")
 
-# CSS personalizzato per interfaccia pulita e Stampa A4
 st.markdown("""
     <style>
     .stApp { background-color: #f8f9fa; }
@@ -33,65 +32,114 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📦 Assistente Riassortimenti")
-st.caption("Dati sincronizzati dai file DBF aziendali")
 
-# Funzione per caricare i file DBF se presenti
+# Caricamento e unione dei file DBF reali
 @st.cache_data(ttl=3600)
-def carica_dati():
-    if os.path.exists('Articoli.dbf') and os.path.exists('SIT_FILIALI.dbf'):
-        # Lettura DBF
-        art = pd.DataFrame(iter(DBF('Articoli.dbf', encoding='latin1')))
-        sit = pd.DataFrame(iter(DBF('SIT_FILIALI.dbf', encoding='latin1')))
+def carica_dati_reali():
+    # Verifica presenza dei file
+    if not (os.path.exists('Articoli.dbf') and os.path.exists('SIT_FILIALI.dbf')):
+        return None, "⚠️ File DBF non trovati su GitHub! Assicurati di aver caricato Articoli.dbf e SIT_FILIALI.dbf."
+    
+    try:
+        # Lettura file DBF
+        art_table = DBF('Articoli.dbf', encoding='latin1', ignore_missing_memofile=True)
+        sit_table = DBF('SIT_FILIALI.dbf', encoding='latin1', ignore_missing_memofile=True)
         
-        # Mappatura delle colonne dei depositi
+        df_art = pd.DataFrame(iter(art_table))
+        df_sit = pd.DataFrame(iter(sit_table))
+        
+        # Mappatura colonne giacenze
         mappa_depositi = {
             'C_01': 'MAGAZZINO', 'C_02': 'SCIACCA', 'C_03': 'MENFI',
             'C_04': 'MARSALA', 'C_05': 'TRAPANI', 'C_06': 'RAGUSA',
             'C_07': 'SABELLA', 'C_08': 'MAZARA', 'C_09': 'CASA MARKET', 'C_10': 'BM SPORT'
         }
-        sit.rename(columns=mappa_depositi, inplace=True)
-        return art, sit
-    return None, None
+        df_sit.rename(columns=mappa_depositi, inplace=True)
+        
+        # Unione dei dati sul codice articolo
+        col_codice_art = [c for c in df_art.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
+        col_codice_sit = [c for c in df_sit.columns if 'cod' in c.lower() or 'art' in c.lower()][0]
+        
+        df_merged = pd.merge(df_art, df_sit, left_on=col_codice_art, right_on=col_codice_sit, how='inner')
+        
+        # Calcolo Giacenza Totale
+        colonne_depositi = list(mappa_depositi.values())
+        colonne_presenti = [c for c in colonne_depositi if c in df_merged.columns]
+        df_merged['GIACENZA_TOTALE'] = df_merged[colonne_presenti].sum(axis=1)
+        
+        return df_merged, None
+    except Exception as e:
+        return None, f"Errore nella lettura dei file DBF: {str(e)}"
 
-art_df, sit_df = carica_dati()
+df_completo, errore = carica_dati_reali()
 
-# Input ricerca
-query = st.chat_input("Scrivi qui la marca o il fornitore (es. DAG, COTONELLA)...")
+if errore:
+    st.error(errore)
+    st.info("👉 Per far funzionare l'app con i tuoi dati reali, carica i file 'Articoli.dbf' e 'SIT_FILIALI.dbf' nella cartella del tuo repository GitHub.")
+else:
+    st.success("✅ Dati DBF caricati e sincronizzati correttamente!")
 
-if query:
-    st.subheader(f"Risultati per: {query}")
+# Ricerca dinamica sui dati veri
+query = st.chat_input("Scrivi una marca, fornitore o tipo di articolo (es. 100 SBADIGLI, DAG, PIGIAMA)...")
+
+if query and df_completo is not None:
+    st.subheader(f"Risultati per la ricerca: \"{query}\"")
     
-    # Esempio dimostrativo se i DBF non sono ancora caricati
-    dati_demo = [
-        {"Codice": "DAG-102", "Articolo": "Calza Spugna Uomo Inverno", "Venduto": 140, "Giacenza": 10, "Ordina": 130},
-        {"Codice": "DAG-105", "Articolo": "Calza Maglia Pesante", "Venduto": 80, "Giacenza": 5, "Ordina": 75},
-        {"Codice": "DAG-201", "Articolo": "Calza Cotone Leggero", "Venduto": 12, "Giacenza": 20, "Ordina": 0}
-    ]
+    # Filtro parole chiave cercate dall'utente su tutte le colonne di testo
+    query_words = query.lower().split()
     
-    for item in dati_demo:
-        if item["Ordina"] > 0:
-            st.markdown(f"""
-                <div class="card-ordina">
-                    <h4>🟢 {item['Articolo']} (Cod. {item['Codice']})</h4>
-                    <p>Venduto Staggione: <b>{item['Venduto']} pz</b> | Giacenza Attuale Filiali: <b>{item['Giacenza']} pz</b></p>
-                    <h3>👉 CONSIQLIATO ORDINARE: {item['Ordina']} pz</h3>
-                </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-                <div class="card-no-ordina">
-                    <h4>🔴 {item['Articolo']} (Cod. {item['Codice']})</h4>
-                    <p>Venduto Stagione: <b>{item['Venduto']} pz</b> | Giacenza Attuale Filiali: <b>{item['Giacenza']} pz</b></p>
-                    <p><b>Scorta sufficiente - Non ordinare</b></p>
-                </div>
-            """, unsafe_allow_html=True)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.components.v1.html(
-            '<button onclick="window.print()" style="background-color:#1a73e8;color:white;border:none;padding:12px;border-radius:5px;width:100%;font-weight:bold;cursor:pointer;">🖨️ Stampa Rapida Report A4</button>',
-            height=50
-        )
-    with col2:
-        df_export = pd.DataFrame(dati_demo)
-        st.download_button("📊 Scarica Excel Ordine", data=df_export.to_csv(index=False).encode('utf-8'), file_name="ordine_riassortimento.csv", mime="text/csv", use_container_width=True)
+    # Crea una colonna unica di testo per cercare la descrizione/marca/fornitore
+    colonne_testo = df_completo.select_dtypes(include=['object']).columns
+    df_completo['TESTO_RICERCA'] = df_completo[colonne_testo].astype(str).agg(' '.join, axis=1).str.lower()
+    
+    # Applica il filtro
+    maschera = df_completo['TESTO_RICERCA'].apply(lambda x: all(word in x for word in query_words))
+    risultati = df_completo[maschera]
+    
+    if risultati.empty:
+        st.warning("Nessun articolo trovato per la ricerca inserita.")
+    else:
+        # Mostra i primi 20 articoli trovati sui dati reali
+        dati_export = []
+        for _, row in risultati.head(20).iterrows():
+            desc = row.get('DESCRIZIONE', row.get('DESCR', 'Articolo senza descrizione'))
+            cod = row.get('Codice_art', row.get('CODICE', 'N/D'))
+            giac = row.get('GIACENZA_TOTALE', 0)
+            
+            # Calcolo di esempio del fabbisogno (puoi personalizzarlo)
+            consiglio = 12 if giac < 5 else 0 
+            
+            dati_export.append({
+                "Codice": cod,
+                "Articolo": desc,
+                "Giacenza Totale": giac,
+                "Consiglio Ordine": consiglio
+            })
+            
+            if consiglio > 0:
+                st.markdown(f"""
+                    <div class="card-ordina">
+                        <h4>🟢 {desc} (Cod. {cod})</h4>
+                        <p>Giacenza Attuale nei 10 punti vendita: <b>{giac} pz</b></p>
+                        <h3>👉 CONSIGLIATO ORDINARE: {consiglio} pz</h3>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                    <div class="card-no-ordina">
+                        <h4>🔴 {desc} (Cod. {cod})</h4>
+                        <p>Giacenza Attuale nei 10 punti vendita: <b>{giac} pz</b></p>
+                        <p><b>Scorta sufficiente - Non ordinare</b></p>
+                    </div>
+                """, unsafe_allow_html=True)
+        
+        # Pulsanti Stampa ed Export
+        col1, col2 = st.columns(2)
+        with col1:
+            st.components.v1.html(
+                '<button onclick="window.print()" style="background-color:#1a73e8;color:white;border:none;padding:12px;border-radius:5px;width:100%;font-weight:bold;cursor:pointer;">🖨️ Stampa Rapida Report A4</button>',
+                height=50
+            )
+        with col2:
+            df_exp = pd.DataFrame(dati_export)
+            st.download_button("📊 Scarica Excel Ordine", data=df_exp.to_csv(index=False).encode('utf-8'), file_name="ordine_riassortimento.csv", mime="text/csv", use_container_width=True)
